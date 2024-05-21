@@ -1,0 +1,84 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+# Audit Logs Receiver Build
+
+trigger:
+  - dev
+
+resources:
+  - repo: self
+
+variables:
+  - group: castai-release
+  - name: imageName
+    value: 'audit-logs-receiver'
+  - name: dockerRegistryServiceConnection
+    value: 'moon-docker-registry'
+
+stages:
+- stage: Build
+  displayName: Build and Push Stage
+  jobs:
+  - job: BuildAndPush
+    displayName: Build and Push Job
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: GoTool@0
+      inputs:
+        version: '1.20.4'
+      displayName: 'Use Go 1.20.4'
+
+    - script: |
+        go install go.opentelemetry.io/collector/cmd/builder@latest
+        go install github.com/open-telemetry/opentelemetry-collector-contrib/cmd/mdatagen@latest
+      displayName: 'Install dependencies'
+
+    - task: CmdLine@2
+      inputs:
+        script: |
+          echo "##vso[task.setvariable variable=RELEASE_TAG;isOutput=true]$(Build.SourceBranch)"
+      condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/'))
+      name: setReleaseTag
+
+    - script: |
+        builder --skip-compilation --config builder-config.yaml
+      displayName: 'Prepare release'
+
+    - script: |
+        cd castai-collector
+        go build -ldflags "-s -w -X main.GitCommit=$(Build.SourceVersion) -X main.GitRef=$(Build.SourceBranch) -X main.Version=$(setReleaseTag.RELEASE_TAG)" -o castai-collector-amd64
+      env:
+        GOOS: linux
+        GOARCH: amd64
+        CGO_ENABLED: 0
+      displayName: 'Build Go binary amd64'
+
+    - script: |
+        cd castai-collector
+        go build -ldflags "-s -w -X main.GitCommit=$(Build.SourceVersion) -X main.GitRef=$(Build.SourceBranch) -X main.Version=$(setReleaseTag.RELEASE_TAG)" -o castai-collector-arm64
+      env:
+        GOOS: linux
+        GOARCH: arm64
+        CGO_ENABLED: 0
+      displayName: 'Build Go binary arm64'
+
+    - script: |
+        cd auditlogsreceiver
+        go test -race ./...
+      displayName: 'Test'
+
+    - task: Docker@2
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageName)'
+        command: 'buildAndPush'
+        dockerFile: '**/Dockerfile'
+        tags: |
+          $(Build.SourceBranch)
+          $(Build.SourceBranchName)
+          $(setReleaseTag.RELEASE_TAG)
+      displayName: 'Build and Push Docker Image'
